@@ -1,0 +1,949 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Drive Zone — Admin Dashboard</title>
+  <link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=DM+Sans:wght@300;400;500;600&display=swap" rel="stylesheet">
+  <script type="module">
+    import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
+    import { getFirestore, collection, getDocs, getDoc, setDoc, updateDoc, deleteDoc, addDoc, doc, query, orderBy, onSnapshot, serverTimestamp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+    import { getAuth, signInWithEmailAndPassword, signOut, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
+
+    // ═══════════════════════════════════════════════════════════════════
+    // FIREBASE CONFIGURATION - GANTI DENGAN DATA ANDA
+    // ═══════════════════════════════════════════════════════════════════
+    const firebaseConfig = {
+      apiKey: "AIzaSyC1KOxK8QrlpZ_cuSXsUlnmKax-a0ts4vg",
+      authDomain: "bookingdearma.firebaseapp.com",
+      projectId: "bookingdearma",
+      storageBucket: "bookingdearma.firebasestorage.app",
+      messagingSenderId: "301525988368",
+      appId: "1:301525988368:web:5be52a56f862cb26890695
+    };
+
+    const isFirebaseConfigured = !firebaseConfig.apiKey.includes('GANTI');
+    let db = null, auth = null;
+
+    if (isFirebaseConfigured) {
+      const app = initializeApp(firebaseConfig);
+      db = getFirestore(app);
+      auth = getAuth(app);
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    // STATE
+    // ═══════════════════════════════════════════════════════════════════
+    let CARS = {};
+    let REKENING = [];
+    let BOOKINGS = [];
+    let curFilter = 'all';
+    let CUR_BOOKING = null;
+    let addTipePesanan = 'rental';
+    let addSelectedCar = '';
+    let addDriverMode = 0;
+    let unsubscribeBookings = null;
+
+    const fmt = n => 'Rp ' + Number(n).toLocaleString('id-ID');
+    function statusBadge(s) {
+      const M = {
+        pending: {c:'badge-pending', i:'⏳', t:'Menunggu'},
+        confirmed: {c:'badge-confirmed', i:'✅', t:'Dikonfirmasi'},
+        active: {c:'badge-active', i:'🚗', t:'Berjalan'},
+        completed: {c:'badge-completed', i:'🏁', t:'Selesai'},
+      };
+      const v = M[s] || M.pending;
+      return `<span class="badge ${v.c}">${v.i} ${v.t}</span>`;
+    }
+    function payBadge(s) {
+      return s === 'paid'
+        ? '<span class="badge badge-paid">✓ Lunas</span>'
+        : '<span class="badge badge-unpaid">✗ Belum</span>';
+    }
+    function toast(msg) {
+      const t = document.createElement('div');
+      t.className = 'toast';
+      t.textContent = msg;
+      document.body.appendChild(t);
+      setTimeout(() => t.remove(), 2600);
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    // AUTH
+    // ═══════════════════════════════════════════════════════════════════
+    window.login = async function() {
+      if (!isFirebaseConfigured || !auth) {
+        document.getElementById('loginErr').textContent = '⚠️ Firebase belum dikonfigurasi!';
+        document.getElementById('loginErr').classList.remove('hidden');
+        return;
+      }
+      const email = document.getElementById('loginEmail').value;
+      const pass = document.getElementById('loginPass').value;
+      try {
+        await signInWithEmailAndPassword(auth, email, pass);
+      } catch (e) {
+        document.getElementById('loginErr').textContent = 'Email atau password salah!';
+        document.getElementById('loginErr').classList.remove('hidden');
+      }
+    };
+
+    window.logout = async function() {
+      if (unsubscribeBookings) unsubscribeBookings();
+      await signOut(auth);
+    };
+
+    if (isFirebaseConfigured && auth) {
+      onAuthStateChanged(auth, user => {
+        if (user) {
+          document.getElementById('loginPage').classList.add('hidden');
+          document.getElementById('dashPage').classList.remove('hidden');
+          document.getElementById('adminEmail').textContent = user.email;
+          initDashboard();
+        } else {
+          document.getElementById('loginPage').classList.remove('hidden');
+          document.getElementById('dashPage').classList.add('hidden');
+        }
+      });
+    } else {
+      document.getElementById('loginErr').innerHTML = '⚠️ Firebase belum dikonfigurasi. Edit file admin.html dan isi Firebase Config.';
+      document.getElementById('loginErr').classList.remove('hidden');
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    // DASHBOARD INIT
+    // ═══════════════════════════════════════════════════════════════════
+    async function initDashboard() {
+      await loadCars();
+      await loadRekening();
+      startRealtimeBookings();
+    }
+
+    async function loadCars() {
+      try {
+        const snap = await getDocs(query(collection(db, 'cars'), orderBy('price')));
+        CARS = {};
+        if (snap.empty) {
+          // Seed default cars
+          const defaultCars = {
+            avanza: {id:'avanza', label:'New Avanza 2024', price:350000, img:''},
+            innova_reborn: {id:'innova_reborn', label:'Innova Reborn', price:500000, img:''},
+            innova_zenix: {id:'innova_zenix', label:'Innova Zenix', price:550000, img:''},
+            fortuner: {id:'fortuner', label:'Fortuner 2024', price:750000, img:''},
+            pajero: {id:'pajero', label:'Pajero 2024', price:800000, img:''},
+            alphard_2023: {id:'alphard_2023', label:'Alphard 2023', price:1500000, img:''},
+            alphard_2025: {id:'alphard_2025', label:'New Alphard 2025', price:1800000, img:''},
+            hiace_commuter: {id:'hiace_commuter', label:'Hiace Commuter', price:900000, img:''},
+            hiace_premio: {id:'hiace_premio', label:'Hiace Premio', price:1100000, img:''},
+          };
+          for (const [key, car] of Object.entries(defaultCars)) {
+            await setDoc(doc(db, 'cars', key), car);
+            CARS[key] = car;
+          }
+        } else {
+          snap.forEach(d => { CARS[d.id] = { id: d.id, ...d.data() }; });
+        }
+      } catch (e) { console.error('loadCars', e); }
+    }
+
+    async function loadRekening() {
+      try {
+        const snap = await getDocs(collection(db, 'rekening'));
+        REKENING = [];
+        snap.forEach(d => REKENING.push({ id: d.id, ...d.data() }));
+      } catch (e) { console.error('loadRekening', e); }
+    }
+
+    function startRealtimeBookings() {
+      const q = query(collection(db, 'bookings'), orderBy('created_at', 'desc'));
+      unsubscribeBookings = onSnapshot(q, snap => {
+        BOOKINGS = [];
+        snap.forEach(d => BOOKINGS.push({ id: d.id, ...d.data() }));
+        renderDash();
+      });
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    // RENDER DASHBOARD
+    // ═══════════════════════════════════════════════════════════════════
+    function renderDash() {
+      const cnt = { all: BOOKINGS.length };
+      ['pending','confirmed','active','completed'].forEach(s => cnt[s] = BOOKINGS.filter(b => b.status === s).length);
+      const unp = BOOKINGS.filter(b => b.payment_status === 'unpaid' && b.status !== 'completed').length;
+
+      document.getElementById('statsGrid').innerHTML = [
+        {k:'all', label:'Total', color:'var(--accent)'},
+        {k:'pending', label:'Menunggu', color:'var(--orange)'},
+        {k:'confirmed', label:'Konfirmasi', color:'var(--blue)'},
+        {k:'active', label:'Berjalan', color:'var(--green)'},
+        {k:'completed', label:'Selesai', color:'var(--muted)'},
+        {k:'_unpaid', label:'Blm Bayar', color:'var(--red)', val:unp},
+      ].map(s => `
+        <div class="stat-card">
+          <div class="stat-num" style="color:${s.color}">${s.val !== undefined ? s.val : (cnt[s.k] || 0)}</div>
+          <div class="stat-lbl">${s.label}</div>
+        </div>
+      `).join('');
+
+      const TABS = [
+        {k:'all', label:'Semua'},
+        {k:'pending', label:'⏳ Menunggu'},
+        {k:'confirmed', label:'✅ Konfirmasi'},
+        {k:'active', label:'🚗 Berjalan'},
+        {k:'completed', label:'🏁 Selesai'},
+      ];
+      document.getElementById('filterTabs').innerHTML = TABS.map(t => `
+        <button class="tab-btn ${curFilter === t.k ? 'active' : ''}" onclick="setFilter('${t.k}')">${t.label} (${t.k === 'all' ? BOOKINGS.length : cnt[t.k] || 0})</button>
+      `).join('');
+
+      const filtered = curFilter === 'all' ? BOOKINGS : BOOKINGS.filter(b => b.status === curFilter);
+      document.getElementById('tBody').innerHTML = filtered.length === 0
+        ? `<tr><td colspan="8" style="text-align:center;color:var(--muted);padding:40px">Tidak ada pesanan</td></tr>`
+        : filtered.map(b => `
+          <tr class="data-row" onclick="openModal('${b.id}')">
+            <td>
+              <div style="font-family:'Bebas Neue',sans-serif;letter-spacing:1px;color:var(--accent);font-size:13px">${b.id}</div>
+              <div style="font-size:10px;color:var(--muted)">${new Date(b.created_at).toLocaleString('id-ID')}</div>
+            </td>
+            <td>
+              <div style="font-weight:600">${b.nama}</div>
+              <div style="font-size:11px;color:var(--muted)">${b.wa}</div>
+            </td>
+            <td><div>${b.car_label || '-'}</div></td>
+            <td>
+              <div style="font-size:12px">${b.start_date}</div>
+              <div style="font-size:11px;color:var(--muted)">${b.days} hari</div>
+            </td>
+            <td style="font-weight:700">${fmt(b.total_price)}</td>
+            <td>${statusBadge(b.status)}</td>
+            <td>${payBadge(b.payment_status)}</td>
+            <td><button class="btn btn-sm btn-outline" onclick="event.stopPropagation();openModal('${b.id}')">Kelola</button></td>
+          </tr>
+        `).join('');
+    }
+
+    window.setFilter = function(f) { curFilter = f; renderDash(); };
+
+    // ═══════════════════════════════════════════════════════════════════
+    // MODAL DETAIL
+    // ═══════════════════════════════════════════════════════════════════
+    window.openModal = function(id) {
+      CUR_BOOKING = BOOKINGS.find(b => b.id === id);
+      if (!CUR_BOOKING) return;
+      const b = CUR_BOOKING;
+      const rs = b.status;
+
+      document.getElementById('mTitle').textContent = `Pesanan ${b.id}`;
+      document.getElementById('mSub').textContent = `${b.nama} — ${b.days} hari — ${fmt(b.total_price)}`;
+
+      const canConf = rs === 'pending';
+      const canAct = rs === 'confirmed';
+      const canDone = rs === 'active';
+      const showDriver = ['confirmed','active','completed'].includes(rs);
+
+      document.getElementById('mBody').innerHTML = `
+        <div style="background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:16px;margin-bottom:16px">
+          <div style="font-size:10px;letter-spacing:2px;text-transform:uppercase;color:var(--muted);margin-bottom:10px">🎛️ Kontrol Status</div>
+          <div style="display:flex;flex-wrap:wrap;align-items:center;gap:8px">
+            ${statusBadge(rs)}
+            ${canConf ? `<button class="btn btn-blue btn-sm" onclick="chStatus('confirmed')">✅ Konfirmasi</button>` : ''}
+            ${canAct ? `<button class="btn btn-green btn-sm" onclick="chStatus('active')">🚗 Berjalan</button>` : ''}
+            ${canDone ? `<button class="btn btn-sm" style="background:rgba(136,136,136,.2);border:1px solid var(--border);color:var(--text)" onclick="chStatus('completed')">🏁 Selesai</button>` : ''}
+          </div>
+          <div style="margin-top:12px;display:flex;gap:8px;flex-wrap:wrap">
+            <a href="tracking.html?id=${b.id}" target="_blank" style="text-decoration:none"><button class="btn btn-outline btn-sm">🔗 Lihat Tracking</button></a>
+            <button class="btn btn-sm btn-outline" onclick="copyTrk()">📋 Salin Link</button>
+          </div>
+        </div>
+
+        <div class="grid-2" style="gap:14px;margin-bottom:16px">
+          <div style="background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:14px">
+            <div class="section-head">👤 Data Penyewa</div>
+            <div class="info-row"><span class="info-label">Nama</span><span class="info-value">${b.nama}</span></div>
+            <div class="info-row"><span class="info-label">WhatsApp</span><span class="info-value"><a href="https://wa.me/${b.wa.replace(/^0/,'62')}" target="_blank" style="color:var(--green)">${b.wa}</a></span></div>
+            <div class="info-row"><span class="info-label">Email</span><span class="info-value">${b.email || '-'}</span></div>
+            <div class="info-row"><span class="info-label">KTP/SIM</span><span class="info-value">${b.ktp || '-'}</span></div>
+          </div>
+          <div style="background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:14px">
+            <div class="section-head">📅 Detail Sewa</div>
+            <div class="info-row"><span class="info-label">Mulai</span><span class="info-value">${b.start_date} ${b.waktu || ''}</span></div>
+            <div class="info-row"><span class="info-label">Selesai</span><span class="info-value">${b.end_date}</span></div>
+            <div class="info-row"><span class="info-label">Durasi</span><span class="info-value">${b.days} hari</span></div>
+            <div class="info-row"><span class="info-label">Lokasi</span><span class="info-value">${b.lokasi || '-'}</span></div>
+            <div class="info-row"><span class="info-label">Total</span><span class="info-value" style="font-weight:700;color:var(--accent)">${fmt(b.total_price)}</span></div>
+          </div>
+        </div>
+
+        <div style="background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:16px;margin-bottom:14px">
+          <div class="section-head">🚙 Kendaraan</div>
+          <div class="info-row"><span class="info-label">Mobil</span><span class="info-value">${b.car_label || '-'}</span></div>
+          <div class="info-row"><span class="info-label">Supir</span><span class="info-value">${b.with_driver ? 'Dengan Supir (Gratis)' : 'Lepas Kunci'}</span></div>
+          ${showDriver ? `
+          <div style="margin-top:12px;padding-top:12px;border-top:1px solid var(--border)">
+            <div style="font-size:10px;color:var(--muted);letter-spacing:2px;text-transform:uppercase;margin-bottom:8px">🧑‍✈️ Info Driver & Kendaraan</div>
+            <div class="grid-2">
+              <div class="field"><label class="field-label">Nama Driver</label><input id="aDrv" type="text" value="${b.driver_name || ''}"></div>
+              <div class="field"><label class="field-label">No. HP Driver</label><input id="aDrvP" type="tel" value="${b.driver_phone || ''}"></div>
+              <div class="field" style="grid-column:1/-1"><label class="field-label">No. Polisi</label><input id="aPlat" type="text" value="${b.vehicle_plate || ''}" style="text-transform:uppercase;font-weight:700;letter-spacing:3px;font-size:16px"></div>
+            </div>
+            <button class="btn btn-primary btn-sm" onclick="saveDrv()">💾 Simpan Info Driver</button>
+          </div>` : ''}
+        </div>
+
+        <div style="background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:16px;margin-bottom:14px">
+          <div class="section-head">💰 Pembayaran</div>
+          <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:12px">
+            ${payBadge(b.payment_status)}
+            ${b.payment_status === 'unpaid' ? `<button class="btn btn-green btn-sm" onclick="markPaid()">✓ Tandai LUNAS</button>` : `<button class="btn btn-red btn-sm" onclick="markUnpaid()">✗ Batalkan Lunas</button>`}
+            <span style="font-size:13px;font-weight:700;color:var(--accent);margin-left:auto">${fmt(b.total_price)}</span>
+          </div>
+          <div class="field" style="margin-bottom:8px">
+            <label class="field-label">Metode Pembayaran</label>
+            <select id="aPay">${['','Transfer Bank','QRIS','Tunai','OVO','GoPay','Dana'].map(m => `<option ${b.payment_method === m ? 'selected' : ''}>${m || '-- Pilih --'}</option>`).join('')}</select>
+          </div>
+          <button class="btn btn-primary btn-sm" onclick="savePay()">💾 Simpan Metode</button>
+        </div>
+
+        <div style="background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:14px;margin-bottom:4px">
+          <div style="font-size:10px;color:var(--muted);letter-spacing:2px;text-transform:uppercase;margin-bottom:6px">Catatan Penyewa</div>
+          <div style="font-size:13px;line-height:1.6">${b.catatan || '-'}</div>
+        </div>
+      `;
+
+      document.getElementById('bModal').classList.add('show');
+    };
+
+    window.closeModal = function() {
+      document.getElementById('bModal').classList.remove('show');
+      CUR_BOOKING = null;
+    };
+
+    window.chStatus = async function(ns) {
+      if (!CUR_BOOKING) return;
+      const updates = { status: ns };
+      if (ns === 'confirmed') updates.confirmed_at = new Date().toISOString();
+      if (ns === 'completed') updates.completed_at = new Date().toISOString();
+      try {
+        await updateDoc(doc(db, 'bookings', CUR_BOOKING.id), updates);
+        toast(`Status diubah ke: ${ns} ✅`);
+        closeModal();
+      } catch (e) { toast('Gagal: ' + e.message); }
+    };
+
+    window.saveDrv = async function() {
+      if (!CUR_BOOKING) return;
+      try {
+        await updateDoc(doc(db, 'bookings', CUR_BOOKING.id), {
+          driver_name: document.getElementById('aDrv').value,
+          driver_phone: document.getElementById('aDrvP').value,
+          vehicle_plate: document.getElementById('aPlat').value.toUpperCase()
+        });
+        toast('Info driver disimpan ✅');
+      } catch (e) { toast('Gagal: ' + e.message); }
+    };
+
+    window.markPaid = async function() {
+      if (!CUR_BOOKING) return;
+      try {
+        await updateDoc(doc(db, 'bookings', CUR_BOOKING.id), {
+          payment_status: 'paid',
+          payment_method: document.getElementById('aPay').value
+        });
+        toast('Pembayaran LUNAS ✅');
+        closeModal();
+      } catch (e) { toast('Gagal: ' + e.message); }
+    };
+
+    window.markUnpaid = async function() {
+      if (!CUR_BOOKING) return;
+      try {
+        await updateDoc(doc(db, 'bookings', CUR_BOOKING.id), { payment_status: 'unpaid' });
+        closeModal();
+      } catch (e) { toast('Gagal: ' + e.message); }
+    };
+
+    window.savePay = async function() {
+      if (!CUR_BOOKING) return;
+      try {
+        await updateDoc(doc(db, 'bookings', CUR_BOOKING.id), {
+          payment_method: document.getElementById('aPay').value
+        });
+        toast('Metode pembayaran disimpan ✅');
+      } catch (e) { toast('Gagal: ' + e.message); }
+    };
+
+    window.copyTrk = function() {
+      if (!CUR_BOOKING) return;
+      const link = `${window.location.origin}/tracking.html?id=${CUR_BOOKING.id}`;
+      navigator.clipboard.writeText(link).then(() => toast('Link disalin ✅'));
+    };
+
+    // ═══════════════════════════════════════════════════════════════════
+    // SETTINGS MODAL
+    // ═══════════════════════════════════════════════════════════════════
+    window.openSettingsModal = function() {
+      document.getElementById('settingsModal').classList.add('show');
+      renderHargaMobil();
+      renderRekening();
+    };
+    window.closeSettingsModal = function() { document.getElementById('settingsModal').classList.remove('show'); };
+    window.switchSettingsTab = function(tab) {
+      document.getElementById('tabHarga').classList.toggle('active', tab === 'harga');
+      document.getElementById('tabRekening').classList.toggle('active', tab === 'rekening');
+      document.getElementById('panelHarga').classList.toggle('hidden', tab !== 'harga');
+      document.getElementById('panelRekening').classList.toggle('hidden', tab !== 'rekening');
+    };
+
+    function renderHargaMobil() {
+      const container = document.getElementById('hargaMobilList');
+      container.innerHTML = Object.entries(CARS).map(([key, car]) => `
+        <div class="settings-panel">
+          <div style="display:flex;align-items:center;gap:12px;margin-bottom:12px">
+            <div style="font-size:24px">🚗</div>
+            <div><div style="font-weight:600">${car.label}</div><div style="font-size:12px;color:var(--muted)">${key}</div></div>
+          </div>
+          <div class="field" style="margin-bottom:0">
+            <label class="field-label">Harga per Hari</label>
+            <input type="number" id="price_${key}" value="${car.price}">
+          </div>
+        </div>
+      `).join('');
+    }
+
+    window.saveHargaMobil = async function() {
+      for (const [key, car] of Object.entries(CARS)) {
+        const newPrice = parseInt(document.getElementById(`price_${key}`).value) || car.price;
+        await updateDoc(doc(db, 'cars', key), { price: newPrice });
+      }
+      await loadCars();
+      toast('Harga mobil disimpan ✅');
+    };
+
+    function renderRekening() {
+      const container = document.getElementById('rekeningList');
+      if (REKENING.length === 0) {
+        container.innerHTML = '<div style="text-align:center;color:var(--muted);padding:20px">Belum ada rekening</div>';
+        return;
+      }
+      container.innerHTML = REKENING.map(rek => `
+        <div class="rekening-card">
+          <div style="display:flex;justify-content:space-between;align-items:flex-start">
+            <div>
+              <div class="rekening-bank">🏦 ${rek.bank}</div>
+              <div class="rekening-nomor">${rek.nomor}</div>
+              <div class="rekening-atasnama">a.n. ${rek.nama}</div>
+            </div>
+            <button class="btn btn-red btn-sm" onclick="hapusRekening('${rek.id}')">🗑️</button>
+          </div>
+        </div>
+      `).join('');
+    }
+
+    window.tambahRekening = async function() {
+      const bank = document.getElementById('rBank').value.trim();
+      const nomor = document.getElementById('rNomor').value.trim();
+      const nama = document.getElementById('rNama').value.trim();
+      if (!bank || !nomor || !nama) { toast('Semua field harus diisi!'); return; }
+      try {
+        await addDoc(collection(db, 'rekening'), { bank, nomor, nama, created_at: new Date().toISOString() });
+        document.getElementById('rBank').value = '';
+        document.getElementById('rNomor').value = '';
+        document.getElementById('rNama').value = '';
+        await loadRekening();
+        renderRekening();
+        toast('Rekening ditambahkan ✅');
+      } catch (e) { toast('Gagal: ' + e.message); }
+    };
+
+    window.hapusRekening = async function(id) {
+      if (!confirm('Hapus rekening ini?')) return;
+      try {
+        await deleteDoc(doc(db, 'rekening', id));
+        await loadRekening();
+        renderRekening();
+        toast('Rekening dihapus');
+      } catch (e) { toast('Gagal: ' + e.message); }
+    };
+
+    // ═══════════════════════════════════════════════════════════════════
+    // TAMBAH PESANAN MODAL
+    // ═══════════════════════════════════════════════════════════════════
+    window.openAddModal = function() {
+      addTipePesanan = 'rental';
+      addSelectedCar = Object.keys(CARS)[0] || 'avanza';
+      addDriverMode = 0;
+      document.getElementById('formTambahPesanan').reset();
+      updateTipePesananUI();
+      renderAddCarGrid();
+      document.getElementById('totalBox').classList.add('hidden');
+      document.getElementById('addModal').classList.add('show');
+    };
+    window.closeAddModal = function() { document.getElementById('addModal').classList.remove('show'); };
+
+    window.setTipePesanan = function(tipe) { addTipePesanan = tipe; updateTipePesananUI(); hitungTotal(); };
+    function updateTipePesananUI() {
+      document.getElementById('tipeRental').classList.toggle('active', addTipePesanan === 'rental');
+      document.getElementById('tipeAirport').classList.toggle('active', addTipePesanan === 'airport');
+      const fieldKembali = document.getElementById('fieldTanggalKembali');
+      if (addTipePesanan === 'airport') {
+        fieldKembali.classList.add('hidden');
+        document.getElementById('tEnd').required = false;
+      } else {
+        fieldKembali.classList.remove('hidden');
+        document.getElementById('tEnd').required = true;
+      }
+    }
+
+    function renderAddCarGrid() {
+      const grid = document.getElementById('addCarGrid');
+      grid.innerHTML = Object.entries(CARS).map(([key, car]) => `
+        <label class="car-card ${addSelectedCar === key ? 'selected' : ''}" onclick="selectAddCar('${key}')">
+          <input type="radio" name="addCar" value="${key}" ${addSelectedCar === key ? 'checked' : ''}>
+          <div style="font-size:24px;margin-bottom:4px">🚗</div>
+          <div class="car-name">${car.label}</div>
+          <div class="car-price">${fmt(car.price)}/hari</div>
+        </label>
+      `).join('');
+      if (document.getElementById('tHargaManual')) document.getElementById('tHargaManual').value = CARS[addSelectedCar]?.price || 0;
+    }
+
+    window.selectAddCar = function(carKey) {
+      addSelectedCar = carKey;
+      renderAddCarGrid();
+      document.getElementById('tHargaManual').value = CARS[carKey]?.price || 0;
+      hitungTotal();
+    };
+
+    window.toggleAddDriver = function(mode) {
+      addDriverMode = mode;
+      document.getElementById('addD0').classList.toggle('active', mode === 0);
+      document.getElementById('addD1').classList.toggle('active', mode === 1);
+    };
+
+    window.hitungTotal = function() {
+      const s = document.getElementById('tStart').value;
+      const e = document.getElementById('tEnd').value;
+      const hargaManual = parseInt(document.getElementById('tHargaManual').value) || 0;
+      if (!s) return;
+      let days, total;
+      if (addTipePesanan === 'airport') { days = 1; total = hargaManual; }
+      else {
+        if (!e) return;
+        days = Math.ceil((new Date(e+'T00:00:00') - new Date(s+'T00:00:00')) / 86400000) + 1;
+        if (days <= 0) return;
+        total = hargaManual * days;
+      }
+      document.getElementById('totalBox').classList.remove('hidden');
+      document.getElementById('totalTxt').textContent = fmt(total);
+      document.getElementById('totalDetail').textContent = addTipePesanan === 'airport' ? 'Airport Transfer (harga flat)' : `${days} hari × ${fmt(hargaManual)}/hari`;
+    };
+
+    document.getElementById('formTambahPesanan').addEventListener('submit', async function(e) {
+      e.preventDefault();
+      const s = document.getElementById('tStart').value;
+      const en = addTipePesanan === 'airport' ? s : document.getElementById('tEnd').value;
+      const hargaManual = parseInt(document.getElementById('tHargaManual').value) || CARS[addSelectedCar]?.price || 0;
+      let days, total;
+      if (addTipePesanan === 'airport') { days = 1; total = hargaManual; }
+      else {
+        days = Math.ceil((new Date(en+'T00:00:00') - new Date(s+'T00:00:00')) / 86400000) + 1;
+        if (days <= 0) { toast('Tanggal pengembalian harus setelah tanggal penjemputan!'); return; }
+        total = hargaManual * days;
+      }
+      const n = new Date();
+      const bookingId = `DZ${n.getFullYear()}${String(n.getMonth()+1).padStart(2,'0')}-${Math.random().toString(36).substr(2,6).toUpperCase()}`;
+      const bookingData = {
+        id: bookingId,
+        nama: document.getElementById('tNama').value,
+        wa: document.getElementById('tWa').value,
+        email: document.getElementById('tEmail').value || null,
+        ktp: document.getElementById('tKtp').value || null,
+        tipe_pesanan: addTipePesanan,
+        car: addSelectedCar,
+        car_label: CARS[addSelectedCar]?.label || addSelectedCar,
+        with_driver: addDriverMode === 0,
+        start_date: s,
+        end_date: en,
+        waktu: document.getElementById('tWkt').value,
+        lokasi: document.getElementById('tLok').value,
+        catatan: document.getElementById('tCatatan').value || '-',
+        days, car_price: hargaManual, total_price: total,
+        status: 'pending', payment_status: 'unpaid',
+        driver_name: document.getElementById('tDriverName').value || null,
+        driver_phone: document.getElementById('tDriverPhone').value || null,
+        vehicle_plate: document.getElementById('tPlat').value?.toUpperCase() || null,
+        payment_method: null, invoice_url: null, car_photos: [],
+        created_at: new Date().toISOString()
+      };
+      try {
+        await setDoc(doc(db, 'bookings', bookingId), bookingData);
+        toast(`Pesanan ${bookingId} berhasil dibuat! ✅`);
+        closeAddModal();
+      } catch (e) { toast('Gagal: ' + e.message); }
+    });
+
+    // Close modals on backdrop click
+    ['bModal','settingsModal','addModal'].forEach(id => {
+      document.getElementById(id).addEventListener('click', e => {
+        if (e.target === document.getElementById(id)) document.getElementById(id).classList.remove('show');
+      });
+    });
+  </script>
+  <style>
+    *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+    :root{
+      --bg:#0d0d0d;--surface:#161616;--card:#1e1e1e;
+      --accent:#f0c040;--accent2:#e05a00;--text:#f5f5f5;--muted:#888;--border:#2e2e2e;
+      --green:#22c55e;--red:#ef4444;--blue:#3b82f6;--orange:#f97316;
+    }
+    body{background:var(--bg);color:var(--text);font-family:'DM Sans',sans-serif;min-height:100vh}
+    .hidden{display:none!important}
+
+    .topbar{background:var(--surface);border-bottom:1px solid var(--border);padding:12px 24px;
+      display:flex;align-items:center;justify-content:space-between;position:sticky;top:0;z-index:50}
+    .topbar-brand{font-family:'Bebas Neue',sans-serif;font-size:26px;letter-spacing:3px;
+      background:linear-gradient(135deg,var(--accent),var(--accent2));-webkit-background-clip:text;
+      -webkit-text-fill-color:transparent;background-clip:text}
+    .topbar-right{display:flex;align-items:center;gap:10px}
+    .admin-tag{font-size:10px;letter-spacing:2px;text-transform:uppercase;color:var(--orange);
+      background:rgba(249,115,22,.1);border:1px solid rgba(249,115,22,.25);border-radius:6px;padding:4px 10px}
+
+    .btn{border:none;border-radius:10px;cursor:pointer;font-family:'DM Sans',sans-serif;
+      font-size:13px;font-weight:600;padding:9px 18px;transition:all .2s;display:inline-flex;align-items:center;gap:6px}
+    .btn:hover{opacity:.88;transform:translateY(-1px)}
+    .btn-primary{background:linear-gradient(135deg,var(--accent),var(--accent2));color:#000}
+    .btn-outline{background:transparent;border:1px solid var(--border);color:var(--muted)}
+    .btn-outline:hover{border-color:var(--accent);color:var(--accent);opacity:1}
+    .btn-green{background:var(--green);color:#fff}
+    .btn-red{background:var(--red);color:#fff}
+    .btn-blue{background:var(--blue);color:#fff}
+    .btn-sm{padding:6px 12px;font-size:12px;border-radius:8px}
+    .w-full{width:100%}
+
+    /* LOGIN */
+    .login-wrap{display:flex;align-items:center;justify-content:center;min-height:90vh;padding:20px}
+    .login-box{background:var(--card);border:1px solid var(--border);border-radius:20px;
+      width:100%;max-width:360px;text-align:center;padding:40px 30px;position:relative;overflow:hidden}
+    .login-box::before{content:'';position:absolute;top:0;left:0;right:0;height:3px;
+      background:linear-gradient(90deg,var(--orange),var(--accent))}
+
+    .field{display:flex;flex-direction:column;gap:6px;margin-bottom:14px;text-align:left}
+    .field-label{font-size:11px;font-weight:600;letter-spacing:2px;text-transform:uppercase;color:var(--muted)}
+    input,select,textarea{background:var(--surface);border:1px solid var(--border);border-radius:10px;
+      color:var(--text);font-family:'DM Sans',sans-serif;font-size:14px;padding:11px 14px;
+      transition:border-color .2s;width:100%;outline:none}
+    input:focus,select:focus,textarea:focus{border-color:var(--accent);box-shadow:0 0 0 3px rgba(240,192,64,.1)}
+    select option{background:#1e1e1e}
+    textarea{resize:vertical;min-height:80px}
+    .grid-2{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+    @media(max-width:600px){.grid-2{grid-template-columns:1fr}}
+
+    /* STATS */
+    .stats-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:16px}
+    @media(min-width:640px){.stats-grid{grid-template-columns:repeat(6,1fr)}}
+    .stat-card{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:14px;text-align:center}
+    .stat-num{font-family:'Bebas Neue',sans-serif;font-size:28px;letter-spacing:2px}
+    .stat-lbl{font-size:10px;color:var(--muted);letter-spacing:1px;text-transform:uppercase;margin-top:2px}
+
+    /* FILTER TABS */
+    .tabs{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:12px}
+    .tab-btn{background:var(--surface);border:1px solid var(--border);border-radius:8px;
+      color:var(--muted);cursor:pointer;font-family:'DM Sans',sans-serif;font-size:12px;font-weight:500;
+      padding:7px 12px;transition:all .2s}
+    .tab-btn.active{border-color:var(--accent);color:var(--accent);background:rgba(240,192,64,.07)}
+
+    /* TABLE */
+    .table-wrap{overflow-x:auto;border-radius:12px;border:1px solid var(--border)}
+    table{width:100%;border-collapse:collapse;font-size:13px}
+    th{background:var(--surface);padding:10px 12px;text-align:left;font-size:10px;letter-spacing:2px;
+      text-transform:uppercase;color:var(--muted);border-bottom:1px solid var(--border)}
+    td{padding:12px;border-bottom:1px solid var(--border)}
+    tr:last-child td{border-bottom:none}
+    .data-row{cursor:pointer;transition:background .15s}
+    .data-row:hover{background:rgba(240,192,64,.04)}
+
+    /* BADGES */
+    .badge{border-radius:20px;font-size:11px;font-weight:600;padding:4px 10px;display:inline-flex;align-items:center;gap:4px}
+    .badge-pending{background:rgba(249,115,22,.15);color:var(--orange)}
+    .badge-confirmed{background:rgba(59,130,246,.15);color:var(--blue)}
+    .badge-active{background:rgba(34,197,94,.15);color:var(--green)}
+    .badge-completed{background:rgba(136,136,136,.15);color:var(--muted)}
+    .badge-paid{background:rgba(34,197,94,.15);color:var(--green)}
+    .badge-unpaid{background:rgba(239,68,68,.15);color:var(--red)}
+
+    /* MODAL */
+    .modal{display:none;position:fixed;inset:0;background:rgba(0,0,0,.85);z-index:999;
+      align-items:flex-start;justify-content:center;padding:20px;overflow-y:auto}
+    .modal.show{display:flex}
+    .modal-box{background:var(--card);border:1px solid var(--border);border-radius:20px;
+      width:100%;max-width:700px;margin:auto;position:relative;overflow:hidden}
+    .modal-header{padding:20px 24px 16px;border-bottom:1px solid var(--border);
+      display:flex;align-items:flex-start;justify-content:space-between;gap:12px}
+    .modal-header-accent{position:absolute;top:0;left:0;right:0;height:3px;
+      background:linear-gradient(90deg,var(--accent),var(--accent2))}
+    .modal-body{padding:20px 24px;max-height:70vh;overflow-y:auto}
+    .modal-close{background:transparent;border:1px solid var(--border);border-radius:8px;
+      color:var(--muted);cursor:pointer;font-size:18px;padding:4px 10px;transition:all .2s;flex-shrink:0}
+    .modal-close:hover{border-color:var(--red);color:var(--red)}
+
+    .section-head{font-family:'Bebas Neue',sans-serif;font-size:14px;letter-spacing:3px;color:var(--accent);
+      display:flex;align-items:center;gap:8px;margin-bottom:10px}
+    .section-head::after{content:'';flex:1;height:1px;background:var(--border)}
+
+    .info-row{display:flex;justify-content:space-between;align-items:flex-start;
+      padding:7px 0;border-bottom:1px solid var(--border);font-size:13px;gap:10px}
+    .info-row:last-child{border-bottom:none}
+    .info-label{color:var(--muted);flex-shrink:0;min-width:90px;font-size:12px}
+    .info-value{text-align:right;font-size:12px;word-break:break-word}
+
+    /* SETTINGS */
+    .settings-panel{background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:14px;margin-bottom:10px}
+    .rekening-card{background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:14px;margin-bottom:8px}
+    .rekening-bank{font-weight:600;font-size:14px;margin-bottom:4px}
+    .rekening-nomor{font-family:'Bebas Neue',sans-serif;font-size:18px;letter-spacing:3px;color:var(--accent)}
+    .rekening-atasnama{font-size:12px;color:var(--muted);margin-top:2px}
+
+    /* CAR GRID (add modal) */
+    .car-grid-sm{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:14px}
+    @media(min-width:640px){.car-grid-sm{grid-template-columns:repeat(4,1fr)}}
+    .car-card{background:var(--surface);border:2px solid var(--border);border-radius:10px;
+      padding:10px 6px;text-align:center;cursor:pointer;transition:all .2s}
+    .car-card.selected{border-color:var(--accent);background:rgba(240,192,64,.05)}
+    .car-card input[type=radio]{display:none}
+    .car-name{font-size:10px;font-weight:600;line-height:1.3;margin-bottom:2px}
+    .car-price{font-size:10px;color:var(--accent)}
+
+    .toggle-row{display:flex;gap:10px}
+    .toggle-btn{flex:1;background:var(--surface);border:2px solid var(--border);border-radius:10px;
+      color:var(--muted);cursor:pointer;font-family:'DM Sans',sans-serif;font-size:12px;font-weight:500;
+      padding:10px 8px;transition:all .2s;text-align:center}
+    .toggle-btn.active{border-color:var(--accent);color:var(--accent);background:rgba(240,192,64,.07)}
+
+    .est-box{background:rgba(240,192,64,.08);border:1px solid rgba(240,192,64,.2);
+      border-radius:10px;padding:12px 16px;margin-bottom:12px}
+
+    /* TOAST */
+    .toast{position:fixed;bottom:24px;left:50%;transform:translateX(-50%);
+      background:var(--card);border:1px solid var(--border);border-radius:10px;
+      color:var(--text);font-size:13px;font-weight:500;padding:10px 20px;z-index:9999;
+      animation:toastIn .3s ease;white-space:nowrap}
+    @keyframes toastIn{from{opacity:0;transform:translateX(-50%) translateY(10px)}to{opacity:1;transform:translateX(-50%) translateY(0)}}
+
+    .alert-error{background:rgba(239,68,68,.1);border:1px solid rgba(239,68,68,.3);border-radius:10px;
+      color:var(--red);padding:12px 16px;font-size:13px}
+
+    .main-pad{max-width:1200px;margin:0 auto;padding:20px 16px}
+    .realtime-dot{width:8px;height:8px;background:var(--green);border-radius:50%;animation:pulse 2s infinite}
+    @keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
+  </style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="topbar-brand">DRIVE ZONE</div>
+  <div class="topbar-right">
+    <div style="display:flex;align-items:center;gap:6px;font-size:12px;color:var(--muted)">
+      <div class="realtime-dot"></div>
+      Realtime
+    </div>
+    <div class="admin-tag">ADMIN</div>
+    <span id="adminEmail" style="font-size:12px;color:var(--muted)"></span>
+    <button class="btn btn-sm btn-outline" onclick="logout()">Logout</button>
+  </div>
+</div>
+
+<!-- LOGIN PAGE -->
+<div id="loginPage">
+  <div class="login-wrap">
+    <div class="login-box">
+      <div style="font-family:'Bebas Neue',sans-serif;font-size:32px;letter-spacing:4px;
+        background:linear-gradient(135deg,var(--accent),var(--accent2));-webkit-background-clip:text;
+        -webkit-text-fill-color:transparent;background-clip:text;margin-bottom:4px">DRIVE ZONE</div>
+      <div style="font-size:11px;letter-spacing:3px;text-transform:uppercase;color:var(--orange);margin-bottom:24px">Admin Panel</div>
+
+      <div id="loginErr" class="alert-error hidden" style="margin-bottom:16px;text-align:left"></div>
+
+      <div class="field" style="text-align:left">
+        <label class="field-label">Email Admin</label>
+        <input id="loginEmail" type="email" placeholder="admin@drive-zone.com">
+      </div>
+      <div class="field" style="text-align:left">
+        <label class="field-label">Password</label>
+        <input id="loginPass" type="password" placeholder="••••••••" onkeydown="if(event.key==='Enter')login()">
+      </div>
+      <button class="btn btn-primary w-full" onclick="login()">🔐 MASUK</button>
+      <div style="margin-top:16px">
+        <a href="index.html" style="font-size:12px;color:var(--muted);text-decoration:none">← Kembali ke Form Booking</a>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- DASHBOARD PAGE -->
+<div id="dashPage" class="hidden">
+  <div class="main-pad">
+
+    <!-- Header -->
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;flex-wrap:wrap;gap:10px">
+      <div>
+        <div style="font-family:'Bebas Neue',sans-serif;font-size:22px;letter-spacing:3px">DASHBOARD PESANAN</div>
+        <div style="font-size:12px;color:var(--muted)">Realtime • Firebase Firestore</div>
+      </div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap">
+        <a href="index.html" target="_blank" style="text-decoration:none">
+          <button class="btn btn-outline btn-sm">🚗 Buka Form Booking</button>
+        </a>
+        <button class="btn btn-outline btn-sm" onclick="openSettingsModal()">⚙️ Pengaturan</button>
+        <button class="btn btn-primary btn-sm" onclick="openAddModal()">➕ Tambah Pesanan</button>
+      </div>
+    </div>
+
+    <!-- Stats -->
+    <div class="stats-grid" id="statsGrid"></div>
+
+    <!-- Filter Tabs -->
+    <div class="tabs" id="filterTabs"></div>
+
+    <!-- Table -->
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>ID / Tgl</th>
+            <th>Penyewa</th>
+            <th>Kendaraan</th>
+            <th>Tanggal</th>
+            <th>Total</th>
+            <th>Status</th>
+            <th>Bayar</th>
+            <th>Aksi</th>
+          </tr>
+        </thead>
+        <tbody id="tBody">
+          <tr><td colspan="8" style="text-align:center;color:var(--muted);padding:40px">Memuat data...</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<!-- BOOKING DETAIL MODAL -->
+<div class="modal" id="bModal">
+  <div class="modal-box">
+    <div class="modal-header-accent"></div>
+    <div class="modal-header">
+      <div>
+        <div style="font-family:'Bebas Neue',sans-serif;font-size:20px;letter-spacing:2px" id="mTitle">Detail Pesanan</div>
+        <div style="font-size:12px;color:var(--muted);margin-top:2px" id="mSub"></div>
+      </div>
+      <button class="modal-close" onclick="closeModal()">✕</button>
+    </div>
+    <div class="modal-body" id="mBody"></div>
+  </div>
+</div>
+
+<!-- SETTINGS MODAL -->
+<div class="modal" id="settingsModal">
+  <div class="modal-box">
+    <div class="modal-header-accent"></div>
+    <div class="modal-header">
+      <div style="font-family:'Bebas Neue',sans-serif;font-size:20px;letter-spacing:2px">⚙️ PENGATURAN</div>
+      <button class="modal-close" onclick="closeSettingsModal()">✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="tabs" style="margin-bottom:16px">
+        <button class="tab-btn active" id="tabHarga" onclick="switchSettingsTab('harga')">💰 Harga Mobil</button>
+        <button class="tab-btn" id="tabRekening" onclick="switchSettingsTab('rekening')">🏦 Rekening</button>
+      </div>
+
+      <div id="panelHarga">
+        <div id="hargaMobilList"></div>
+        <button class="btn btn-primary" onclick="saveHargaMobil()">💾 Simpan Semua Harga</button>
+      </div>
+
+      <div id="panelRekening" class="hidden">
+        <div id="rekeningList"></div>
+        <div style="background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:14px;margin-top:12px">
+          <div style="font-size:12px;font-weight:600;color:var(--muted);letter-spacing:1px;margin-bottom:10px">➕ Tambah Rekening</div>
+          <div class="field"><label class="field-label">Nama Bank</label><input id="rBank" placeholder="BCA, BNI, Mandiri..."></div>
+          <div class="field"><label class="field-label">Nomor Rekening</label><input id="rNomor" placeholder="1234567890"></div>
+          <div class="field" style="margin-bottom:10px"><label class="field-label">Nama Pemilik</label><input id="rNama" placeholder="Nama pemilik rekening"></div>
+          <button class="btn btn-primary" onclick="tambahRekening()">➕ Tambah Rekening</button>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- TAMBAH PESANAN MODAL -->
+<div class="modal" id="addModal">
+  <div class="modal-box">
+    <div class="modal-header-accent"></div>
+    <div class="modal-header">
+      <div style="font-family:'Bebas Neue',sans-serif;font-size:20px;letter-spacing:2px">➕ TAMBAH PESANAN</div>
+      <button class="modal-close" onclick="closeAddModal()">✕</button>
+    </div>
+    <div class="modal-body">
+      <form id="formTambahPesanan">
+        <div style="margin-bottom:14px">
+          <div class="section-head">Tipe Pesanan</div>
+          <div class="toggle-row">
+            <button type="button" class="toggle-btn active" id="tipeRental" onclick="setTipePesanan('rental')">🚗 Rental Mobil</button>
+            <button type="button" class="toggle-btn" id="tipeAirport" onclick="setTipePesanan('airport')">✈️ Airport Transfer</button>
+          </div>
+        </div>
+
+        <div class="section-head">🚗 Pilih Kendaraan</div>
+        <div class="car-grid-sm" id="addCarGrid"></div>
+
+        <div class="field">
+          <label class="field-label">Harga Manual (per hari / flat)</label>
+          <input type="number" id="tHargaManual" placeholder="350000" onchange="hitungTotal()">
+        </div>
+
+        <div class="section-head">🧑‍✈️ Pengemudi</div>
+        <div class="toggle-row" style="margin-bottom:14px">
+          <button type="button" class="toggle-btn active" id="addD0" onclick="toggleAddDriver(0)">🧑‍✈️ Dengan Supir</button>
+          <button type="button" class="toggle-btn" id="addD1" onclick="toggleAddDriver(1)">🔑 Lepas Kunci</button>
+        </div>
+
+        <div class="section-head">👤 Data Penyewa</div>
+        <div class="grid-2">
+          <div class="field"><label class="field-label">Nama *</label><input id="tNama" required></div>
+          <div class="field"><label class="field-label">WhatsApp *</label><input id="tWa" required></div>
+          <div class="field"><label class="field-label">Email</label><input id="tEmail" type="email"></div>
+          <div class="field"><label class="field-label">KTP/SIM</label><input id="tKtp"></div>
+        </div>
+
+        <div class="section-head">📅 Detail Sewa</div>
+        <div class="grid-2">
+          <div class="field"><label class="field-label">Tanggal Mulai *</label><input id="tStart" type="date" required onchange="hitungTotal()"></div>
+          <div class="field" id="fieldTanggalKembali"><label class="field-label">Tanggal Selesai *</label><input id="tEnd" type="date" required onchange="hitungTotal()"></div>
+          <div class="field"><label class="field-label">Jam *</label><input id="tWkt" type="time" required></div>
+          <div class="field"><label class="field-label">Lokasi *</label><input id="tLok" required placeholder="Kota Medan / Bandara..."></div>
+        </div>
+        <div class="field"><label class="field-label">Catatan</label><textarea id="tCatatan"></textarea></div>
+
+        <div class="section-head">🧑‍✈️ Info Driver (Opsional)</div>
+        <div class="grid-2">
+          <div class="field"><label class="field-label">Nama Driver</label><input id="tDriverName"></div>
+          <div class="field"><label class="field-label">No. HP Driver</label><input id="tDriverPhone"></div>
+          <div class="field" style="grid-column:1/-1"><label class="field-label">No. Polisi</label><input id="tPlat" style="text-transform:uppercase;font-weight:700;letter-spacing:3px"></div>
+        </div>
+
+        <div id="totalBox" class="est-box hidden" style="margin-bottom:14px">
+          <div style="font-size:10px;color:var(--muted);letter-spacing:2px;text-transform:uppercase;margin-bottom:4px">Estimasi Total</div>
+          <div style="font-family:'Bebas Neue',sans-serif;font-size:24px;letter-spacing:2px;color:var(--accent)" id="totalTxt">Rp 0</div>
+          <div style="font-size:11px;color:var(--muted);margin-top:2px" id="totalDetail"></div>
+        </div>
+
+        <div style="display:flex;gap:8px">
+          <button type="submit" class="btn btn-primary">💾 Simpan Pesanan</button>
+          <button type="button" class="btn btn-outline" onclick="closeAddModal()">Batal</button>
+        </div>
+      </form>
+    </div>
+  </div>
+</div>
+
+</body>
+</html>
